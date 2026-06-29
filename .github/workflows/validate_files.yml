@@ -1,0 +1,233 @@
+name: CDM File Format Validation
+
+on:
+  push:
+    paths:
+      - "**/taxizones.txt"
+      - "**/rate.txt"
+      - "**/SidInterval.txt"
+      - "**/CTOT.txt"
+      - "**/slots.txt"
+      - "**/cad.txt"
+  pull_request:
+    paths:
+      - "**/taxizones.txt"
+      - "**/rate.txt"
+      - "**/SidInterval.txt"
+      - "**/CTOT.txt"
+      - "**/slots.txt"
+      - "**/cad.txt"
+  workflow_dispatch:
+    inputs:
+      full_scan:
+        description: "Validate all CDM files (not just changed ones)"
+        required: false
+        default: "true"
+        type: boolean
+
+permissions:
+  issues: write
+  pull-requests: write
+
+jobs:
+  validate:
+    name: Validate CDM Files
+    runs-on: ubuntu-latest
+
+    steps:
+      # ------------------------------------------------------------------ #
+      # 1. Checkout                                                         #
+      # ------------------------------------------------------------------ #
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # ------------------------------------------------------------------ #
+      # 2. Detect which CDM files changed (push / PR only)                 #
+      # ------------------------------------------------------------------ #
+      - name: Detect changed CDM files
+        id: changed
+        if: github.event_name != 'workflow_dispatch'
+        uses: tj-actions/changed-files@v44
+        with:
+          files: |
+            **/taxizones.txt
+            **/rate.txt
+            **/SidInterval.txt
+            **/CTOT.txt
+            **/slots.txt
+            **/cad.txt
+
+      # ------------------------------------------------------------------ #
+      # 3. Run validator                                                    #
+      # ------------------------------------------------------------------ #
+      - name: Run validation (changed files only)
+        id: validate
+        if: github.event_name != 'workflow_dispatch' && steps.changed.outputs.any_changed == 'true'
+        continue-on-error: true
+        run: |
+          cp .github/workflows/validate_files.py validate_files.py
+          python validate_files.py ${{ steps.changed.outputs.all_changed_files }}
+
+      - name: Run validation (all CDM files)
+        id: validate_all
+        if: github.event_name == 'workflow_dispatch' || steps.changed.outputs.any_changed != 'true'
+        continue-on-error: true
+        run: |
+          cp .github/workflows/validate_files.py validate_files.py
+          python validate_files.py
+
+      # ------------------------------------------------------------------ #
+      # 4a. Direct push → open (or update) a GitHub issue                  #
+      # ------------------------------------------------------------------ #
+      - name: Create or update issue (push)
+        if: |
+          github.event_name == 'push' && (
+            steps.validate.outcome == 'failure' ||
+            steps.validate_all.outcome == 'failure'
+          )
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO:     ${{ github.repository }}
+          SHA:      ${{ github.sha }}
+          RUN_URL:  ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+
+          python3 << 'PYEOF'
+          import json, os
+
+          d       = json.load(open("errors.json"))
+          errors  = d["errors"]
+          run_url = os.environ["RUN_URL"]
+          sha     = os.environ["SHA"][:7]
+
+          lines = [
+              f"## CDM Validation Failed — {len(errors)} error(s)",
+              "",
+              f"Detected on commit `{sha}`. [View run]({run_url})",
+              "",
+              "### Errors by file",
+              "",
+          ]
+
+          by_file = {}
+          for e in errors:
+              by_file.setdefault(e["file"], []).append(e)
+
+          for filepath, errs in by_file.items():
+              lines.append(f"**`{filepath}`**")
+              lines.append("")
+              lines.append("| Line | Original content | Error |")
+              lines.append("|------|-----------------|-------|")
+              for e in errs:
+                  orig = e["original"].replace("|", "\\|")
+                  msg  = e["message"].replace("|", "\\|")
+                  lines.append(f"| {e['line']} | `{orig}` | {msg} |")
+              lines.append("")
+
+          lines += [
+              "---",
+              "Please correct the flagged lines and push again.",
+          ]
+
+          open("/tmp/issue_body.md", "w").write("\n".join(lines))
+          PYEOF
+
+          EXISTING_ISSUE=$(gh issue list \
+            --repo "$REPO" \
+            --label "cdm-validation" \
+            --state open \
+            --limit 1 \
+            2>/dev/null | awk '{print $1}' || true)
+
+          if [ -n "$EXISTING_ISSUE" ]; then
+            echo "Adding comment to existing issue #$EXISTING_ISSUE"
+            gh issue comment "$EXISTING_ISSUE" \
+              --repo "$REPO" \
+              --body-file /tmp/issue_body.md
+          else
+            echo "Creating new issue"
+            gh issue create \
+              --repo "$REPO" \
+              --title "CDM file validation errors detected" \
+              --body-file /tmp/issue_body.md \
+              --label "cdm-validation"
+          fi
+
+      # ------------------------------------------------------------------ #
+      # 4b. Pull request → post a comment on the PR                        #
+      # ------------------------------------------------------------------ #
+      - name: Comment on PR
+        if: |
+          github.event_name == 'pull_request' && (
+            steps.validate.outcome == 'failure' ||
+            steps.validate_all.outcome == 'failure'
+          )
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO:     ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          RUN_URL:  ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          SHA:      ${{ github.sha }}
+        run: |
+          set -euo pipefail
+
+          python3 << 'PYEOF'
+          import json, os
+
+          d       = json.load(open("errors.json"))
+          errors  = d["errors"]
+          run_url = os.environ["RUN_URL"]
+          sha     = os.environ["SHA"][:7]
+
+          lines = [
+              f"## CDM Validation Failed — {len(errors)} error(s)",
+              "",
+              f"Detected on commit `{sha}`. [View run]({run_url})",
+              "",
+              "### Errors by file",
+              "",
+          ]
+
+          by_file = {}
+          for e in errors:
+              by_file.setdefault(e["file"], []).append(e)
+
+          for filepath, errs in by_file.items():
+              lines.append(f"**`{filepath}`**")
+              lines.append("")
+              lines.append("| Line | Original content | Error |")
+              lines.append("|------|-----------------|-------|")
+              for e in errs:
+                  orig = e["original"].replace("|", "\\|")
+                  msg  = e["message"].replace("|", "\\|")
+                  lines.append(f"| {e['line']} | `{orig}` | {msg} |")
+              lines.append("")
+
+          lines += [
+              "---",
+              "Please correct the flagged lines before merging.",
+          ]
+
+          open("/tmp/pr_comment.md", "w").write("\n".join(lines))
+          PYEOF
+
+          gh pr comment "$PR_NUMBER" \
+            --repo "$REPO" \
+            --body-file /tmp/pr_comment.md
+
+      # ------------------------------------------------------------------ #
+      # 5. Fail the job so the commit/PR is marked red                     #
+      # ------------------------------------------------------------------ #
+      - name: Fail on validation errors
+        if: |
+          steps.validate.outcome == 'failure' ||
+          steps.validate_all.outcome == 'failure'
+        run: |
+          echo "Validation errors were found."
+          exit 1
