@@ -59,7 +59,9 @@ def read_all_lines(filepath):
 # taxizones.txt
 # AIRPORT:RUNWAY:BL_LAT:BL_LON:TL_LAT:TL_LON:TR_LAT:TR_LON:BR_LAT:BR_LON:TAXITIME[:REM1,REM2,REM3,REM4,REM5[:EVENT_EXTRA_TIME]]
 # ---------------------------------------------------------------------------
-LAT_RE  = re.compile(r"^-?\d+(\.\d+)?$")
+# Accept both decimal AND DMS format (e.g., N029.15.10.383 or E047.57.33.706)
+LAT_RE  = re.compile(r"^-?\d+(\.\d+)?$|^[NS]?\d{3}\.\d{2}\.\d{2}\.\d{3}$")
+LON_RE  = re.compile(r"^-?\d+(\.\d+)?$|^[EW]?\d{3}\.\d{2}\.\d{2}\.\d{3}$")
 ICAO_RE = re.compile(r"^[A-Z]{4}$")
 RWY_RE  = re.compile(r"^\d{2}[LCR]?$")
 
@@ -94,9 +96,15 @@ def validate_taxizones(filepath):
 
         labels = ["BL_LAT","BL_LON","TL_LAT","TL_LON","TR_LAT","TR_LON","BR_LAT","BR_LON"]
         for idx, coord in enumerate(coords):
-            if not LAT_RE.match(coord):
-                error(filepath, lineno,
-                      f"Coordinate field {labels[idx]} '{coord}' is not a valid decimal number", line)
+            # Check if it's latitude (even indices) or longitude (odd indices)
+            if idx % 2 == 0:  # Latitude (BL_LAT, TL_LAT, TR_LAT, BR_LAT)
+                if not LAT_RE.match(coord):
+                    error(filepath, lineno,
+                        f"Coordinate field {labels[idx]} '{coord}' is not a valid decimal or DMS format", line)
+            else:  # Longitude (BL_LON, TL_LON, TR_LON, BR_LON)
+                if not LON_RE.match(coord):
+                    error(filepath, lineno,
+                        f"Coordinate field {labels[idx]} '{coord}' is not a valid decimal or DMS format", line)
 
         try:
             tt = int(taxitime_str)
