@@ -257,7 +257,7 @@ def validate_sid_interval(filepath):
 #   <cid>,<callsign>,<slot>                           — 3 fields
 #   <cid>,<callsign>,<departure>,<destination>,<slot>  — 5 fields
 # ---------------------------------------------------------------------------
-CID_RE      = re.compile(r"^\d{7}$")
+CID_RE      = re.compile(r"^\d{6,7}$")
 CALLSIGN_RE = re.compile(r"^[A-Z0-9]{3,7}$")
 SLOT_RE     = re.compile(r"^([01]\d|2[0-3])[0-5]\d$")
 
@@ -266,7 +266,7 @@ def validate_slot_fields(filepath, lineno, parts, line):
     n = len(parts)
     cid = parts[0]
     if not CID_RE.match(cid):
-        error(filepath, lineno, f"CID '{cid}' must be a 7-digit integer (VATSIM CID)", line)
+        error(filepath, lineno, f"CID '{cid}' must be a 6- or 7-digit integer (VATSIM CID)", line)
 
     if n == 2:
         if not SLOT_RE.match(parts[1]):
