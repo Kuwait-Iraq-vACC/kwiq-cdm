@@ -1,0 +1,195 @@
+name: Clear Slots
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "OKAC/slots.txt"
+      - "ORBB/slots.txt"
+  workflow_dispatch:
+    inputs:
+      fir:
+        description: "Which FIR to clear"
+        required: false
+        type: choice
+        options:
+          - both
+          - OKAC
+          - ORBB
+        default: both
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  clear-slots:
+    name: Clear ${{ matrix.fir }} slots
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - fir: OKAC
+            file: OKAC/slots.txt
+            label: clear-slots-okac
+            branch: clear-slots/okac
+          - fir: ORBB
+            file: ORBB/slots.txt
+            label: clear-slots-orbb
+            branch: clear-slots/orbb
+
+    steps:
+      # ------------------------------------------------------------------ #
+      # 1. Checkout                                                         #
+      # ------------------------------------------------------------------ #
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # ------------------------------------------------------------------ #
+      # 2. Only proceed if THIS file is the one that changed               #
+      # ------------------------------------------------------------------ #
+      - name: Determine if this file changed
+        id: changed
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            SELECTED="${{ inputs.fir }}"
+            if [ "$SELECTED" = "both" ] || [ "$SELECTED" = "${{ matrix.fir }}" ]; then
+              echo "changed=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "changed=false" >> "$GITHUB_OUTPUT"
+            fi
+          else
+            BEFORE="${{ github.event.before }}"
+            if echo "$BEFORE" | grep -qE '^0+$'; then
+              # New branch / no prior commit to diff against — be safe and check it
+              echo "changed=true" >> "$GITHUB_OUTPUT"
+            elif git diff --name-only "$BEFORE" "${{ github.sha }}" | grep -qx "${{ matrix.file }}"; then
+              echo "changed=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "changed=false" >> "$GITHUB_OUTPUT"
+            fi
+          fi
+
+      # ------------------------------------------------------------------ #
+      # 3. Bail out if a PR is already open for this file                  #
+      # ------------------------------------------------------------------ #
+      - name: Check for existing open PR
+        id: existing
+        if: steps.changed.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          COUNT=$(gh pr list \
+            --repo "$REPO" \
+            --label "${{ matrix.label }}" \
+            --state open \
+            --json number \
+            --jq 'length')
+          echo "count=$COUNT" >> "$GITHUB_OUTPUT"
+
+      # ------------------------------------------------------------------ #
+      # 4. Trim the slots file down to its first two (header) lines        #
+      # ------------------------------------------------------------------ #
+      - name: Trim slots file
+        if: steps.changed.outputs.changed == 'true' && steps.existing.outputs.count == '0'
+        id: trim
+        run: |
+          set -euo pipefail
+          FILE="${{ matrix.file }}"
+
+          if [ ! -f "$FILE" ]; then
+            echo "⚠️  $FILE not found — skipping"
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          python3 - "$FILE" << 'PYEOF'
+          import sys
+
+          path = sys.argv[1]
+          with open(path, encoding="utf-8") as f:
+              lines = f.readlines()
+
+          header = lines[:2]
+          if lines != header:
+              with open(path, "w", encoding="utf-8") as f:
+                  f.writelines(header)
+          PYEOF
+
+          if git diff --quiet -- "$FILE"; then
+            echo "No slot entries to clear — file already trimmed"
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      # ------------------------------------------------------------------ #
+      # 5. Ensure the label exists (idempotent)                            #
+      # ------------------------------------------------------------------ #
+      - name: Ensure label exists
+        if: steps.changed.outputs.changed == 'true' && steps.existing.outputs.count == '0' && steps.trim.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          gh label create "${{ matrix.label }}" \
+            --repo "$REPO" \
+            --color "D93F0B" \
+            --description "Auto PR to clear ${{ matrix.fir }} slot entries" \
+            --force
+
+      # ------------------------------------------------------------------ #
+      # 6. Commit on a dedicated branch and open the PR                    #
+      # ------------------------------------------------------------------ #
+      - name: Create branch, commit, and open PR
+        if: steps.changed.outputs.changed == 'true' && steps.existing.outputs.count == '0' && steps.trim.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          BRANCH="${{ matrix.branch }}"
+          FILE="${{ matrix.file }}"
+          FIR="${{ matrix.fir }}"
+          SHORT_SHA="${SHA:0:7}"
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git checkout -B "$BRANCH"
+          git add "$FILE"
+          git commit -m "Clear $FIR slots ($FILE) after direct edit"
+          git push --force origin "$BRANCH"
+
+          gh pr create \
+            --repo "$REPO" \
+            --base main \
+            --head "$BRANCH" \
+            --title "Clear $FIR slots — $FILE was edited" \
+            --body "\`$FILE\` was edited directly on \`main\` (commit \`$SHORT_SHA\`), so this PR clears all slot entries in it, keeping only the two header/comment lines.
+
+Please review and merge once you've confirmed $FIR is ready to have its slot list reset." \
+            --label "${{ matrix.label }}" \
+            --reviewer jyang365
+
+      # ------------------------------------------------------------------ #
+      # 7. Log why nothing happened, when applicable                       #
+      # ------------------------------------------------------------------ #
+      - name: Skip — file not changed
+        if: steps.changed.outputs.changed == 'false'
+        run: echo "${{ matrix.file }} was not part of this change — skipping."
+
+      - name: Skip — PR already open
+        if: steps.changed.outputs.changed == 'true' && steps.existing.outputs.count != '0'
+        run: echo "An open PR already exists for ${{ matrix.file }} (label ${{ matrix.label }}) — skipping."
+
+      - name: Skip — nothing to clear
+        if: steps.changed.outputs.changed == 'true' && steps.existing.outputs.count == '0' && steps.trim.outputs.changed == 'false'
+        run: echo "${{ matrix.file }} has no slot entries to clear — skipping."
