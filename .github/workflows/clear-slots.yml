@@ -168,14 +168,18 @@ jobs:
           git commit -m "Clear $FIR slots ($FILE) after direct edit"
           git push --force origin "$BRANCH"
 
+          cat > /tmp/pr_body.md << EOF
+          \`$FILE\` was edited directly on \`main\` (commit \`$SHORT_SHA\`), so this PR clears all slot entries in it, keeping only the two header/comment lines.
+
+          Please review and merge once you've confirmed $FIR is ready to have its slot list reset.
+          EOF
+
           gh pr create \
             --repo "$REPO" \
             --base main \
             --head "$BRANCH" \
             --title "Clear $FIR slots — $FILE was edited" \
-            --body "\`$FILE\` was edited directly on \`main\` (commit \`$SHORT_SHA\`), so this PR clears all slot entries in it, keeping only the two header/comment lines.
-
-Please review and merge once you've confirmed $FIR is ready to have its slot list reset." \
+            --body-file /tmp/pr_body.md \
             --label "${{ matrix.label }}" \
             --reviewer jyang365
 
